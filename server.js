@@ -1,250 +1,311 @@
-// server.js - Production Ready (PostgreSQL + Neon)
 require('dotenv').config();
 const express = require('express');
+const { Pool } = require('pg');
 const cors = require('cors');
-const { Pool } = require('pg'); // <--- Using Postgres
-const { v4: uuidv4 } = require('uuid');
-const jwt = require('jsonwebtoken'); 
-const crypto = require('crypto');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const Razorpay = require('razorpay');
-const bcrypt = require('bcryptjs'); 
+const crypto = require('crypto');
 
 const app = express();
 
-// --- 1. CONFIGURATION ---
-app.use(cors()); 
+// Middleware
+app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || "fallback_secret";
-const ADMIN_SECRET_CODE = "OMR-ADMIN-2026"; 
-
-// Razorpay Config
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID, 
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
-
-// --- 2. DATABASE CONNECTION (NEON) ---
+// --- DATABASE CONNECTION ---
+// Connects to your Neon/Postgres Cloud DB
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false } // Required for Neon
+  ssl: {
+    rejectUnauthorized: false // Required for secure cloud connections (Render/Neon)
+  }
 });
 
-// Test Connection on Startup
-pool.connect((err, client, release) => {
-  if (err) return console.error('❌ Cloud DB Connection Failed:', err.stack);
-  console.log('✅ Connected to Neon Cloud Database (Postgres)');
-  release();
+// --- RAZORPAY INSTANCE ---
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET
 });
 
-// Initialize Tables (Postgres Syntax)
+// --- INITIALIZE TABLES ---
 const initDB = async () => {
   try {
-    // Users Table
+    // 1. Users Table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
-        id VARCHAR(255) PRIMARY KEY,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        name VARCHAR(255),
-        company VARCHAR(255),
-        role VARCHAR(50) DEFAULT 'user',
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100),
+        email VARCHAR(100) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        company VARCHAR(100),
+        role VARCHAR(20) DEFAULT 'user', 
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-
-    // Licenses Table
+    
+    // 2. Licenses Table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS licenses (
-        id VARCHAR(255) PRIMARY KEY,
-        license_key VARCHAR(255) UNIQUE NOT NULL,
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
         tier VARCHAR(50),
-        status VARCHAR(50) DEFAULT 'ACTIVE',
-        hardware_id VARCHAR(255),
-        device_name VARCHAR(255),
-        email VARCHAR(255),
+        license_key VARCHAR(100) UNIQUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    console.log("✅ Tables Initialized");
+
+    // 3. Jobs Table (For Careers Page)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS jobs (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(100) NOT NULL,
+        department VARCHAR(100),
+        location VARCHAR(100),
+        type VARCHAR(50), 
+        description TEXT,
+        posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log("✅ Database Tables Initialized: Users, Licenses, Jobs");
   } catch (err) {
-    console.error("Error initializing DB:", err);
+    console.error("❌ Database Initialization Error:", err);
   }
 };
+initDB();
 
-initDB(); // Run immediately
-
-// Helper: Generate Key
-const generateKey = (tier) => {
-  const rand = () => crypto.randomBytes(2).toString('hex').toUpperCase();
-  return `${tier}-${rand()}-${rand()}-${rand()}`;
+// --- HELPER: GENERATE LICENSE KEY ---
+const generateLicenseKey = () => {
+  return 'OMR-' + crypto.randomBytes(4).toString('hex').toUpperCase() + 
+         '-' + crypto.randomBytes(4).toString('hex').toUpperCase();
 };
 
-// --- 3. MIDDLEWARE ---
-
-const verifyToken = (req, res, next) => {
+// --- MIDDLEWARE: AUTHENTICATE TOKEN ---
+const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
-  if(!authHeader) return res.status(401).json({error: "No token"});
+  const token = authHeader && authHeader.split(' ')[1];
   
-  const token = authHeader.split(' ')[1];
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+  if (!token) return res.status(401).json({ error: "Access Denied. No token provided." });
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ error: "Invalid Token" });
+    req.user = user;
     next();
-  } catch(e) {
-    res.status(403).json({error: "Invalid Token"});
-  }
+  });
 };
 
-const verifyAdmin = (req, res, next) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({error: "Access Denied: Admins Only"});
-  }
-  next();
-};
+// ==================================================================
+//                            API ROUTES
+// ==================================================================
 
-// --- 4. AUTH ROUTES ---
+// ----------------------
+// 1. AUTHENTICATION
+// ----------------------
 
+// SIGNUP
 app.post('/api/auth/signup', async (req, res) => {
   const { name, email, password, company } = req.body;
-  if(!email || !password) return res.status(400).json({error: "Missing fields"});
-
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const userId = uuidv4();
-    const role = (company === ADMIN_SECRET_CODE) ? 'admin' : 'user'; 
+    // Check if user exists
+    const userCheck = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (userCheck.rows.length > 0) {
+      return res.status(400).json({ error: "Email already exists" });
+    }
 
-    await pool.query(
-      `INSERT INTO users (id, email, password_hash, name, company, role) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [userId, email, hashedPassword, name, company, role]
+    // Hash Password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Check for Admin Code (Backdoor for testing)
+    const role = company === 'OMR-ADMIN-2026' ? 'admin' : 'user';
+
+    // Insert User
+    const result = await pool.query(
+      'INSERT INTO users (name, email, password, company, role) VALUES ($1, $2, $3, $4, $5) RETURNING id, name, email, role, company',
+      [name, email, hashedPassword, company, role]
     );
 
-    const token = jwt.sign({ id: userId, email, role }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ success: true, token, user: { name, email, role, company } });
+    const user = result.rows[0];
+    const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, process.env.JWT_SECRET);
 
-  } catch (e) {
-    if (e.code === '23505') return res.status(400).json({ error: "Email already exists" });
-    console.error(e);
+    res.json({ success: true, token, user });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Server Error" });
   }
 });
 
+// LOGIN
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
-
   try {
-    const result = await pool.query(`SELECT * FROM users WHERE email = $1`, [email]);
+    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (result.rows.length === 0) return res.status(400).json({ error: "User not found" });
+
     const user = result.rows[0];
+    const validPass = await bcrypt.compare(password, user.password);
+    if (!validPass) return res.status(400).json({ error: "Invalid Password" });
 
-    if (!user) return res.status(404).json({ error: "User not found" });
+    const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, process.env.JWT_SECRET);
 
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: "Incorrect password" });
-
-    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ success: true, token, user: { name: user.name, email: user.email, role: user.role, company: user.company } });
+    // Return user info (excluding password)
+    res.json({ 
+      success: true, 
+      token, 
+      user: { id: user.id, name: user.name, email: user.email, role: user.role, company: user.company } 
+    });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Login Error" });
+    res.status(500).json({ error: "Server Error" });
   }
 });
 
-app.get('/api/my-licenses', verifyToken, async (req, res) => {
-  try {
-    const result = await pool.query(`SELECT * FROM licenses WHERE email = $1`, [req.user.email]);
-    res.json({ success: true, licenses: result.rows });
-  } catch (err) {
-    res.status(500).json({ error: "DB Error" });
-  }
-});
+// ----------------------
+// 2. PAYMENT & ORDERS (Razorpay)
+// ----------------------
 
-// --- 5. ADMIN ROUTES ---
-
-app.post('/api/admin/generate-key', verifyToken, verifyAdmin, async (req, res) => {
-  const { tier, email } = req.body; 
-  const newKey = generateKey(tier || 'PRO');
-  const id = uuidv4();
-  
-  try {
-    await pool.query(
-      `INSERT INTO licenses (id, license_key, tier, email, status) VALUES ($1, $2, $3, $4, 'ACTIVE')`,
-      [id, newKey, tier, email]
-    );
-    console.log(`👑 ADMIN GENERATED: ${tier} Key for ${email}`);
-    res.json({ success: true, license_key: newKey });
-  } catch (err) {
-    res.status(500).json({ error: "DB Error" });
-  }
-});
-
-// --- 6. PAYMENT ROUTES ---
-
-app.post('/api/create-order', verifyToken, async (req, res) => {
+// CREATE ORDER
+app.post('/api/create-order', authenticateToken, async (req, res) => {
   const { tier } = req.body;
-  let amount = (tier === 'BASIC') ? 49900 : (tier === 'PRO') ? 149900 : 0;
-  if (!amount) return res.status(400).json({ error: 'Invalid Tier' });
+  const amount = tier === 'PRO' ? 149900 : 49900; // Amount in paise (1499 INR or 499 INR)
 
   try {
     const options = {
-      amount: amount, 
+      amount: amount,
       currency: "INR",
-      receipt: "order_" + uuidv4().substring(0,8),
+      receipt: "order_rcptid_" + Date.now()
     };
     const order = await razorpay.orders.create(options);
-    res.json({ success: true, order_id: order.id, amount: amount, key_id: process.env.RAZORPAY_KEY_ID });
-  } catch (error) {
-    res.status(500).json({ error: "Razorpay Error" });
+    res.json({ 
+      success: true, 
+      order_id: order.id, 
+      amount: order.amount, 
+      key_id: process.env.RAZORPAY_KEY_ID 
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Payment Gateway Error" });
   }
 });
 
-app.post('/api/verify-payment', verifyToken, async (req, res) => {
-  const { razorpay_order_id, razorpay_payment_id, razorpay_signature, tier, email } = req.body;
+// VERIFY PAYMENT & GENERATE LICENSE
+app.post('/api/verify-payment', authenticateToken, async (req, res) => {
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature, tier } = req.body;
+
   const body = razorpay_order_id + "|" + razorpay_payment_id;
-  const expectedSignature = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET).update(body.toString()).digest('hex');
+  const expectedSignature = crypto
+    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+    .update(body.toString())
+    .digest('hex');
 
   if (expectedSignature === razorpay_signature) {
-    const newKey = generateKey(tier);
-    const id = uuidv4();
+    // Payment Successful -> Generate License
+    const licenseKey = generateLicenseKey();
+    
     try {
       await pool.query(
-        `INSERT INTO licenses (id, license_key, tier, email) VALUES ($1, $2, $3, $4)`,
-        [id, newKey, tier, email]
+        'INSERT INTO licenses (user_id, tier, license_key) VALUES ($1, $2, $3)',
+        [req.user.id, tier, licenseKey]
       );
-      res.json({ success: true, license_key: newKey });
-    } catch (err) { res.status(500).json({ error: "DB Error" }); }
+      res.json({ success: true, license_key: licenseKey });
+    } catch (dbErr) {
+      console.error(dbErr);
+      res.status(500).json({ error: "Payment verified but license generation failed." });
+    }
   } else {
     res.status(400).json({ success: false, error: "Invalid Signature" });
   }
 });
 
-// --- 7. DESKTOP ACTIVATION ---
+// ----------------------
+// 3. LICENSES
+// ----------------------
 
-app.post('/api/activate', async (req, res) => {
-  const { license_key, hardware_id, device_name } = req.body;
-  if (!license_key || !hardware_id) return res.status(400).json({ error: "Missing data" });
-
+// GET MY LICENSES
+app.get('/api/my-licenses', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(`SELECT * FROM licenses WHERE license_key = $1`, [license_key]);
-    const row = result.rows[0];
-
-    if (!row) return res.status(404).json({ error: "Invalid License Key" });
-    if (row.hardware_id && row.hardware_id !== hardware_id) {
-      return res.status(403).json({ error: "License locked to another machine", locked_to: row.device_name });
-    }
-
-    if (!row.hardware_id) {
-      await pool.query(`UPDATE licenses SET hardware_id = $1, device_name = $2 WHERE id = $3`, [hardware_id, device_name, row.id]);
-    }
-
-    const token = jwt.sign({ key: row.license_key, tier: row.tier, email: row.email, hwid: hardware_id }, JWT_SECRET, { expiresIn: '365d' });
-    res.json({ success: true, token, tier: row.tier });
+    const result = await pool.query('SELECT * FROM licenses WHERE user_id = $1 ORDER BY created_at DESC', [req.user.id]);
+    res.json({ success: true, licenses: result.rows });
   } catch (err) {
-    res.status(500).json({ error: "Activation Error" });
+    res.status(500).json({ error: "Failed to fetch licenses" });
   }
 });
 
-// Start Server
-app.listen(PORT, () => {
-  console.log(`🚀 OMR Cloud Server running on port ${PORT}`);
+// ADMIN: GENERATE KEY MANUALLY
+app.post('/api/admin/generate-key', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admin access required" });
+
+  const { email, tier } = req.body;
+  const licenseKey = generateLicenseKey();
+
+  try {
+    // Find user ID by email
+    const userRes = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    
+    if (userRes.rows.length === 0) {
+      return res.status(404).json({ error: "User email not found. User must register first." });
+    }
+
+    const userId = userRes.rows[0].id;
+    
+    await pool.query(
+      'INSERT INTO licenses (user_id, tier, license_key) VALUES ($1, $2, $3)',
+      [userId, tier, licenseKey]
+    );
+
+    res.json({ success: true, license_key: licenseKey });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Database Error" });
+  }
 });
+
+// ----------------------
+// 4. JOBS / CAREERS (New!)
+// ----------------------
+
+// PUBLIC: GET ALL JOBS
+app.get('/api/jobs', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM jobs ORDER BY posted_at DESC');
+    res.json({ success: true, jobs: result.rows });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch jobs" });
+  }
+});
+
+// ADMIN: POST A JOB
+app.post('/api/admin/jobs', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: "Admins only." });
+  }
+
+  const { title, department, location, type, description } = req.body;
+
+  try {
+    const result = await pool.query(
+      'INSERT INTO jobs (title, department, location, type, description) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [title, department, location, type, description]
+    );
+    res.json({ success: true, job: result.rows[0] });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to post job" });
+  }
+});
+
+// ADMIN: DELETE A JOB
+app.delete('/api/admin/jobs/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only." });
+
+  try {
+    await pool.query('DELETE FROM jobs WHERE id = $1', [req.params.id]);
+    res.json({ success: true, message: "Job deleted" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete job" });
+  }
+});
+
+// --- START SERVER ---
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`OMR Cloud Server running on port ${PORT}`));
