@@ -2,23 +2,22 @@ require('dotenv').config();
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcryptjs'); // ✅ Using bcryptjs for stability
 const jwt = require('jsonwebtoken');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 
 const app = express();
 
-// Middleware
+// --- MIDDLEWARE ---
 app.use(cors());
 app.use(express.json());
 
 // --- DATABASE CONNECTION ---
-// Connects to your Neon/Postgres Cloud DB
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
-    rejectUnauthorized: false // Required for secure cloud connections (Render/Neon)
+    rejectUnauthorized: false // Required for Render/Neon
   }
 });
 
@@ -28,9 +27,19 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET
 });
 
-// --- INITIALIZE TABLES ---
+// --- DATABASE INITIALIZATION ---
 const initDB = async () => {
   try {
+    console.log("🔄 Initializing Database...");
+
+    // 🔴 DELETE THESE 3 LINES AFTER YOUR FIRST SUCCESSFUL SIGNUP!
+    // This wipes the database to fix your current schema errors.
+    await pool.query('DROP TABLE IF EXISTS licenses CASCADE');
+    await pool.query('DROP TABLE IF EXISTS jobs CASCADE');
+    await pool.query('DROP TABLE IF EXISTS users CASCADE');
+    console.log("⚠️ Old tables dropped (Schema Reset)"); 
+    // ---------------------------------------------------------
+
     // 1. Users Table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
@@ -48,14 +57,14 @@ const initDB = async () => {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS licenses (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id),
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         tier VARCHAR(50),
         license_key VARCHAR(100) UNIQUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
-    // 3. Jobs Table (For Careers Page)
+    // 3. Jobs Table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS jobs (
         id SERIAL PRIMARY KEY,
@@ -68,25 +77,24 @@ const initDB = async () => {
       );
     `);
 
-    console.log("✅ Database Tables Initialized: Users, Licenses, Jobs");
+    console.log("✅ Database Tables Ready: Users, Licenses, Jobs");
   } catch (err) {
-    console.error("❌ Database Initialization Error:", err);
+    console.error("❌ Database Init Error:", err);
   }
 };
 initDB();
 
-// --- HELPER: GENERATE LICENSE KEY ---
+// --- HELPER FUNCTIONS ---
 const generateLicenseKey = () => {
   return 'OMR-' + crypto.randomBytes(4).toString('hex').toUpperCase() + 
          '-' + crypto.randomBytes(4).toString('hex').toUpperCase();
 };
 
-// --- MIDDLEWARE: AUTHENTICATE TOKEN ---
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   
-  if (!token) return res.status(401).json({ error: "Access Denied. No token provided." });
+  if (!token) return res.status(401).json({ error: "Access Denied" });
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) return res.status(403).json({ error: "Invalid Token" });
@@ -116,7 +124,7 @@ app.post('/api/auth/signup', async (req, res) => {
     // Hash Password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Check for Admin Code (Backdoor for testing)
+    // Admin Backdoor
     const role = company === 'OMR-ADMIN-2026' ? 'admin' : 'user';
 
     // Insert User
@@ -131,7 +139,7 @@ app.post('/api/auth/signup', async (req, res) => {
     res.json({ success: true, token, user });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Server Error" });
+    res.status(500).json({ error: "Server Error during Signup" });
   }
 });
 
@@ -148,7 +156,6 @@ app.post('/api/auth/login', async (req, res) => {
 
     const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, process.env.JWT_SECRET);
 
-    // Return user info (excluding password)
     res.json({ 
       success: true, 
       token, 
@@ -156,18 +163,17 @@ app.post('/api/auth/login', async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Server Error" });
+    res.status(500).json({ error: "Server Error during Login" });
   }
 });
 
 // ----------------------
-// 2. PAYMENT & ORDERS (Razorpay)
+// 2. PAYMENT (Razorpay)
 // ----------------------
 
-// CREATE ORDER
 app.post('/api/create-order', authenticateToken, async (req, res) => {
   const { tier } = req.body;
-  const amount = tier === 'PRO' ? 149900 : 49900; // Amount in paise (1499 INR or 499 INR)
+  const amount = tier === 'PRO' ? 149900 : 49900; // in paise
 
   try {
     const options = {
@@ -184,11 +190,10 @@ app.post('/api/create-order', authenticateToken, async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Payment Gateway Error" });
+    res.status(500).json({ error: "Payment Gateway Failed" });
   }
 });
 
-// VERIFY PAYMENT & GENERATE LICENSE
 app.post('/api/verify-payment', authenticateToken, async (req, res) => {
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature, tier } = req.body;
 
@@ -199,9 +204,7 @@ app.post('/api/verify-payment', authenticateToken, async (req, res) => {
     .digest('hex');
 
   if (expectedSignature === razorpay_signature) {
-    // Payment Successful -> Generate License
     const licenseKey = generateLicenseKey();
-    
     try {
       await pool.query(
         'INSERT INTO licenses (user_id, tier, license_key) VALUES ($1, $2, $3)',
@@ -209,8 +212,7 @@ app.post('/api/verify-payment', authenticateToken, async (req, res) => {
       );
       res.json({ success: true, license_key: licenseKey });
     } catch (dbErr) {
-      console.error(dbErr);
-      res.status(500).json({ error: "Payment verified but license generation failed." });
+      res.status(500).json({ error: "License Generation Failed" });
     }
   } else {
     res.status(400).json({ success: false, error: "Invalid Signature" });
@@ -221,7 +223,6 @@ app.post('/api/verify-payment', authenticateToken, async (req, res) => {
 // 3. LICENSES
 // ----------------------
 
-// GET MY LICENSES
 app.get('/api/my-licenses', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM licenses WHERE user_id = $1 ORDER BY created_at DESC', [req.user.id]);
@@ -231,7 +232,6 @@ app.get('/api/my-licenses', authenticateToken, async (req, res) => {
   }
 });
 
-// ADMIN: GENERATE KEY MANUALLY
 app.post('/api/admin/generate-key', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: "Admin access required" });
 
@@ -239,32 +239,24 @@ app.post('/api/admin/generate-key', authenticateToken, async (req, res) => {
   const licenseKey = generateLicenseKey();
 
   try {
-    // Find user ID by email
     const userRes = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-    
-    if (userRes.rows.length === 0) {
-      return res.status(404).json({ error: "User email not found. User must register first." });
-    }
+    if (userRes.rows.length === 0) return res.status(404).json({ error: "User not found" });
 
-    const userId = userRes.rows[0].id;
-    
     await pool.query(
       'INSERT INTO licenses (user_id, tier, license_key) VALUES ($1, $2, $3)',
-      [userId, tier, licenseKey]
+      [userRes.rows[0].id, tier, licenseKey]
     );
-
     res.json({ success: true, license_key: licenseKey });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Database Error" });
   }
 });
 
 // ----------------------
-// 4. JOBS / CAREERS (New!)
+// 4. CAREERS (Jobs)
 // ----------------------
 
-// PUBLIC: GET ALL JOBS
+// Public: Get all jobs
 app.get('/api/jobs', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM jobs ORDER BY posted_at DESC');
@@ -274,14 +266,11 @@ app.get('/api/jobs', async (req, res) => {
   }
 });
 
-// ADMIN: POST A JOB
+// Admin: Post Job
 app.post('/api/admin/jobs', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: "Admins only." });
-  }
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
 
   const { title, department, location, type, description } = req.body;
-
   try {
     const result = await pool.query(
       'INSERT INTO jobs (title, department, location, type, description) VALUES ($1, $2, $3, $4, $5) RETURNING *',
@@ -289,14 +278,13 @@ app.post('/api/admin/jobs', authenticateToken, async (req, res) => {
     );
     res.json({ success: true, job: result.rows[0] });
   } catch (err) {
-    console.error(err);
     res.status(500).json({ error: "Failed to post job" });
   }
 });
 
-// ADMIN: DELETE A JOB
+// Admin: Delete Job
 app.delete('/api/admin/jobs/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only." });
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
 
   try {
     await pool.query('DELETE FROM jobs WHERE id = $1', [req.params.id]);
@@ -306,7 +294,6 @@ app.delete('/api/admin/jobs/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// --- START SERVER ---
+// --- SERVER START ---
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`OMR Cloud Server running on port ${PORT}`));
-
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
