@@ -32,11 +32,6 @@ const initDB = async () => {
   try {
     console.log("🔄 Initializing Database...");
     
-    // ⚠️ DISABLED DESTRUCTIVE DROP for safety
-    // await pool.query('DROP TABLE IF EXISTS licenses CASCADE');
-    // await pool.query('DROP TABLE IF EXISTS jobs CASCADE');
-    // await pool.query('DROP TABLE IF EXISTS users CASCADE');
-    
     // 1. Users Table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
@@ -74,7 +69,22 @@ const initDB = async () => {
       );
     `);
 
-    console.log("✅ Database Tables Ready: Users, Licenses, Jobs");
+    // 4. Support Tickets Table (NEW ✅)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS support_tickets (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100),
+        email VARCHAR(100),
+        category VARCHAR(50),
+        subject VARCHAR(255),
+        message TEXT,
+        system_info TEXT,
+        status VARCHAR(20) DEFAULT 'OPEN',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log("✅ Database Tables Ready: Users, Licenses, Jobs, Support Tickets");
   } catch (err) {
     console.error("❌ Database Init Error:", err);
   }
@@ -160,7 +170,7 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // ----------------------
-// 2. ACTIVATE LICENSE (NEW)
+// 2. ACTIVATE LICENSE
 // ----------------------
 app.post('/api/activate', async (req, res) => {
     const { license_key, hardware_id, device_name } = req.body;
@@ -234,12 +244,9 @@ app.get('/api/updates/:target/:arch/:current_version', async (req, res) => {
 });
 
 // ----------------------
-// 4. NOTIFICATIONS (NEW) ✅
+// 4. NOTIFICATIONS
 // ----------------------
 app.get('/api/notifications', async (req, res) => {
-    // In a real app, you'd fetch this from a 'messages' table
-    // For now, hardcode your announcements here!
-    
     const notifications = [
         {
             id: 'welcome-msg',
@@ -307,7 +314,7 @@ app.get('/api/my-licenses', authenticateToken, async (req, res) => {
 });
 
 // ----------------------
-// 6. JOBS (Careers)
+// 6. JOBS
 // ----------------------
 app.get('/api/jobs', async (req, res) => {
   try {
@@ -331,6 +338,36 @@ app.delete('/api/admin/jobs/:id', authenticateToken, async (req, res) => {
         await pool.query('DELETE FROM jobs WHERE id = $1', [req.params.id]);
         res.json({ success: true, message: "Job deleted" });
     } catch (err) { res.status(500).json({ error: "Failed to delete job" }); }
+});
+
+// ----------------------
+// 7. SUPPORT SYSTEM (NEW ✅)
+// ----------------------
+
+// Submit Ticket (From Desktop App)
+app.post('/api/support', async (req, res) => {
+    const { name, email, category, subject, message, system_info } = req.body;
+    try {
+        const result = await pool.query(
+            'INSERT INTO support_tickets (name, email, category, subject, message, system_info) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+            [name, email, category, subject, message, system_info]
+        );
+        res.json({ success: true, ticket_id: result.rows[0].id });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to submit ticket" });
+    }
+});
+
+// Get All Tickets (For OMR Systems Website / Admin)
+// In production, you should add 'authenticateToken' and check for admin role here!
+app.get('/api/admin/tickets', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT * FROM support_tickets ORDER BY created_at DESC');
+        res.json({ success: true, tickets: result.rows });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch tickets" });
+    }
 });
 
 const PORT = process.env.PORT || 5000;
