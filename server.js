@@ -69,7 +69,7 @@ const initDB = async () => {
       );
     `);
 
-    // 4. Support Tickets Table (NEW ✅)
+    // 4. Support Tickets Table (UPDATED ✅ - Added priority field)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS support_tickets (
         id SERIAL PRIMARY KEY,
@@ -79,12 +79,24 @@ const initDB = async () => {
         subject VARCHAR(255),
         message TEXT,
         system_info TEXT,
-        status VARCHAR(20) DEFAULT 'OPEN',
+        priority VARCHAR(20) DEFAULT 'medium',
+        status VARCHAR(20) DEFAULT 'open',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
-    console.log("✅ Database Tables Ready: Users, Licenses, Jobs, Support Tickets");
+    // 5. Ticket Replies Table (NEW ✅ - For conversation history)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ticket_replies (
+        id SERIAL PRIMARY KEY,
+        ticket_id INTEGER REFERENCES support_tickets(id) ON DELETE CASCADE,
+        sender_type VARCHAR(20) NOT NULL,
+        message TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log("✅ Database Tables Ready: Users, Licenses, Jobs, Support Tickets, Ticket Replies");
   } catch (err) {
     console.error("❌ Database Init Error:", err);
   }
@@ -341,16 +353,16 @@ app.delete('/api/admin/jobs/:id', authenticateToken, async (req, res) => {
 });
 
 // ----------------------
-// 7. SUPPORT SYSTEM (NEW ✅)
+// 7. SUPPORT SYSTEM (UPDATED ✅)
 // ----------------------
 
 // Submit Ticket (From Desktop App)
-app.post('/api/support', async (req, res) => {
-    const { name, email, category, subject, message, system_info } = req.body;
+app.post('/api/support/tickets', async (req, res) => {
+    const { name, email, category, subject, message, system_info, priority } = req.body;
     try {
         const result = await pool.query(
-            'INSERT INTO support_tickets (name, email, category, subject, message, system_info) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-            [name, email, category, subject, message, system_info]
+            'INSERT INTO support_tickets (name, email, category, subject, message, system_info, priority) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+            [name, email, category, subject, message, system_info, priority || 'medium']
         );
         res.json({ success: true, ticket_id: result.rows[0].id });
     } catch (err) {
@@ -360,13 +372,124 @@ app.post('/api/support', async (req, res) => {
 });
 
 // Get All Tickets (For OMR Systems Website / Admin)
-// In production, you should add 'authenticateToken' and check for admin role here!
-app.get('/api/admin/tickets', async (req, res) => {
+app.get('/api/admin/tickets', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+    
+    const status = req.query.status;
     try {
-        const result = await pool.query('SELECT * FROM support_tickets ORDER BY created_at DESC');
+        let query = 'SELECT * FROM support_tickets';
+        let params = [];
+        
+        if (status && status !== 'all') {
+            query += ' WHERE LOWER(status) = $1';
+            params.push(status.toUpperCase());
+        }
+        
+        query += ' ORDER BY created_at DESC';
+        const result = await pool.query(query, params);
         res.json({ success: true, tickets: result.rows });
     } catch (err) {
+        console.error(err);
         res.status(500).json({ error: "Failed to fetch tickets" });
+    }
+});
+
+// ✅ NEW: Get Single Ticket with Replies
+app.get('/api/support/tickets/:id', authenticateToken, async (req, res) => {
+    const ticketId = req.params.id;
+    
+    try {
+        // Fetch ticket
+        const ticketResult = await pool.query(
+            'SELECT * FROM support_tickets WHERE id = $1',
+            [ticketId]
+        );
+        
+        if (ticketResult.rows.length === 0) {
+            return res.status(404).json({ error: "Ticket not found" });
+        }
+        
+        const ticket = ticketResult.rows[0];
+        
+        // Fetch all replies for this ticket
+        const repliesResult = await pool.query(
+            'SELECT id, sender_type, message, created_at FROM ticket_replies WHERE ticket_id = $1 ORDER BY created_at ASC',
+            [ticketId]
+        );
+        
+        res.json({ 
+            success: true, 
+            ticket: {
+                ...ticket,
+                replies: repliesResult.rows
+            }
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to fetch ticket details" });
+    }
+});
+
+// ✅ NEW: Add Reply to Ticket
+app.post('/api/support/tickets/:id/reply', authenticateToken, async (req, res) => {
+    const ticketId = req.params.id;
+    const { message } = req.body;
+    
+    if (!message?.trim()) {
+        return res.status(400).json({ error: "Message cannot be empty" });
+    }
+    
+    try {
+        // Check if ticket exists
+        const ticketCheck = await pool.query('SELECT * FROM support_tickets WHERE id = $1', [ticketId]);
+        if (ticketCheck.rows.length === 0) {
+            return res.status(404).json({ error: "Ticket not found" });
+        }
+        
+        // Determine sender type (admin or user)
+        const senderType = req.user.role === 'admin' ? 'admin' : 'user';
+        
+        // Insert reply
+        const result = await pool.query(
+            'INSERT INTO ticket_replies (ticket_id, sender_type, message) VALUES ($1, $2, $3) RETURNING *',
+            [ticketId, senderType, message]
+        );
+        
+        res.json({ success: true, reply: result.rows[0] });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to add reply" });
+    }
+});
+
+// ✅ NEW: Update Ticket Status (Admin only)
+app.patch('/api/admin/tickets/:id/status', authenticateToken, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: "Admins only" });
+    }
+    
+    const ticketId = req.params.id;
+    const { status } = req.body;
+    
+    const validStatuses = ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
+    if (!validStatuses.includes(status?.toUpperCase())) {
+        return res.status(400).json({ error: "Invalid status" });
+    }
+    
+    try {
+        const result = await pool.query(
+            'UPDATE support_tickets SET status = $1 WHERE id = $2 RETURNING *',
+            [status.toUpperCase(), ticketId]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: "Ticket not found" });
+        }
+        
+        res.json({ success: true, ticket: result.rows[0] });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to update ticket status" });
     }
 });
 
