@@ -356,32 +356,55 @@ app.delete('/api/admin/jobs/:id', authenticateToken, async (req, res) => {
 // 7. SUPPORT SYSTEM (UPDATED ✅)
 // ----------------------
 
-// Submit Ticket (From Desktop App)
-app.post('/api/support/tickets', async (req, res) => {
+// Submit Ticket (From Desktop App) - Both endpoints for compatibility
+const submitTicket = async (req, res) => {
     const { name, email, category, subject, message, system_info, priority } = req.body;
     try {
         const result = await pool.query(
-            'INSERT INTO support_tickets (name, email, category, subject, message, system_info, priority) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-            [name, email, category, subject, message, system_info, priority || 'medium']
+            'INSERT INTO support_tickets (name, email, category, subject, message, system_info, priority, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at, status',
+            [name, email, category, subject, message, system_info, priority || 'medium', 'OPEN']
         );
-        res.json({ success: true, ticket_id: result.rows[0].id });
+        res.json({ success: true, ticket_id: result.rows[0].id, created_at: result.rows[0].created_at, status: result.rows[0].status });
     } catch (err) {
-        console.error(err);
+        console.error('Ticket submission error:', err);
         res.status(500).json({ error: "Failed to submit ticket" });
     }
-});
+};
+
+// Both endpoints (new and old for compatibility)
+app.post('/api/support/tickets', submitTicket);
+app.post('/api/support', submitTicket);
 
 // Get All Tickets (For OMR Systems Website / Admin)
-app.get('/api/admin/tickets', authenticateToken, async (req, res) => {
-    if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+app.get('/api/admin/tickets', (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
     
+    if (!token) {
+        return res.status(401).json({ error: "Access Denied - No token provided" });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) {
+            console.error('Token verification error:', err.message);
+            return res.status(403).json({ error: "Invalid Token" });
+        }
+        
+        if (user.role !== 'admin') {
+            return res.status(403).json({ error: "Admins only" });
+        }
+        
+        req.user = user;
+        next();
+    });
+}, async (req, res) => {
     const status = req.query.status;
     try {
         let query = 'SELECT * FROM support_tickets';
         let params = [];
         
         if (status && status !== 'all') {
-            query += ' WHERE LOWER(status) = $1';
+            query += ' WHERE UPPER(status) = $1';
             params.push(status.toUpperCase());
         }
         
@@ -389,13 +412,28 @@ app.get('/api/admin/tickets', authenticateToken, async (req, res) => {
         const result = await pool.query(query, params);
         res.json({ success: true, tickets: result.rows });
     } catch (err) {
-        console.error(err);
+        console.error('Fetch tickets error:', err);
         res.status(500).json({ error: "Failed to fetch tickets" });
     }
 });
 
 // ✅ NEW: Get Single Ticket with Replies
-app.get('/api/support/tickets/:id', authenticateToken, async (req, res) => {
+app.get('/api/support/tickets/:id', (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ error: "Access Denied - No token provided" });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) {
+            return res.status(403).json({ error: "Invalid Token" });
+        }
+        req.user = user;
+        next();
+    });
+}, async (req, res) => {
     const ticketId = req.params.id;
     
     try {
@@ -425,13 +463,28 @@ app.get('/api/support/tickets/:id', authenticateToken, async (req, res) => {
             }
         });
     } catch (err) {
-        console.error(err);
+        console.error('Fetch ticket details error:', err);
         res.status(500).json({ error: "Failed to fetch ticket details" });
     }
 });
 
 // ✅ NEW: Add Reply to Ticket
-app.post('/api/support/tickets/:id/reply', authenticateToken, async (req, res) => {
+app.post('/api/support/tickets/:id/reply', (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ error: "Access Denied - No token provided" });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) {
+            return res.status(403).json({ error: "Invalid Token" });
+        }
+        req.user = user;
+        next();
+    });
+}, async (req, res) => {
     const ticketId = req.params.id;
     const { message } = req.body;
     
@@ -457,7 +510,7 @@ app.post('/api/support/tickets/:id/reply', authenticateToken, async (req, res) =
         
         res.json({ success: true, reply: result.rows[0] });
     } catch (err) {
-        console.error(err);
+        console.error('Add reply error:', err);
         res.status(500).json({ error: "Failed to add reply" });
     }
 });
