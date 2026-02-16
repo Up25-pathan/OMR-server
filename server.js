@@ -346,6 +346,60 @@ app.get('/api/my-licenses', authenticateToken, async (req, res) => {
   }
 });
 
+// ✅ NEW: Admin Generate License Directly (without payment)
+app.post('/api/admin/generate-license', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: "Admins only" });
+  }
+
+  const { email, tier } = req.body;
+  
+  if (!email || !tier) {
+    return res.status(400).json({ error: "Email and tier are required" });
+  }
+
+  try {
+    // Find or create user with the provided email
+    let userResult = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    let userId;
+
+    if (userResult.rows.length === 0) {
+      // Create new user with this email (user won't have a password, admin-generated)
+      const tempPassword = crypto.randomBytes(16).toString('hex');
+      const hashedPassword = await bcrypt.hash(tempPassword, 10);
+      const createResult = await pool.query(
+        'INSERT INTO users (name, email, password, role) VALUES ($1, $2, $3, $4) RETURNING id',
+        [email.split('@')[0], email, hashedPassword, 'user']
+      );
+      userId = createResult.rows[0].id;
+      console.log(`✅ Created new user for email: ${email}`);
+    } else {
+      userId = userResult.rows[0].id;
+      console.log(`✅ Using existing user for email: ${email}`);
+    }
+
+    // Generate license key
+    const licenseKey = generateLicenseKey();
+    
+    // Create license
+    const result = await pool.query(
+      'INSERT INTO licenses (user_id, tier, license_key) VALUES ($1, $2, $3) RETURNING *',
+      [userId, tier, licenseKey]
+    );
+
+    res.json({ 
+      success: true, 
+      license_key: licenseKey,
+      tier: tier,
+      email: email,
+      message: `License generated successfully for ${email}`
+    });
+  } catch (err) {
+    console.error('Admin license generation error:', err.message);
+    res.status(500).json({ error: "Failed to generate license: " + err.message });
+  }
+});
+
 // ----------------------
 // 6. JOBS
 // ----------------------
