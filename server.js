@@ -516,11 +516,27 @@ app.post('/api/support/tickets/:id/reply', (req, res, next) => {
 });
 
 // ✅ NEW: Update Ticket Status (Admin only)
-app.patch('/api/admin/tickets/:id/status', authenticateToken, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: "Admins only" });
-    }
+app.patch('/api/admin/tickets/:id/status', (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
     
+    if (!token) {
+        return res.status(401).json({ error: "Access Denied - No token provided" });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) {
+            return res.status(403).json({ error: "Invalid Token" });
+        }
+        
+        if (user.role !== 'admin') {
+            return res.status(403).json({ error: "Admins only" });
+        }
+        
+        req.user = user;
+        next();
+    });
+}, async (req, res) => {
     const ticketId = req.params.id;
     const { status } = req.body;
     
@@ -541,7 +557,7 @@ app.patch('/api/admin/tickets/:id/status', authenticateToken, async (req, res) =
         
         res.json({ success: true, ticket: result.rows[0] });
     } catch (err) {
-        console.error(err);
+        console.error('Update status error:', err);
         res.status(500).json({ error: "Failed to update ticket status" });
     }
 });
