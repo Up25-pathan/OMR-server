@@ -80,7 +80,7 @@ const initDB = async () => {
         message TEXT,
         system_info TEXT,
         priority VARCHAR(20) DEFAULT 'medium',
-        status VARCHAR(20) DEFAULT 'open',
+        status VARCHAR(20) DEFAULT 'OPEN',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -95,6 +95,17 @@ const initDB = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // 6. MIGRATION: Add priority column if it doesn't exist
+    try {
+      await pool.query(`
+        ALTER TABLE support_tickets 
+        ADD COLUMN IF NOT EXISTS priority VARCHAR(20) DEFAULT 'medium';
+      `);
+      console.log("✅ Priority column added to support_tickets");
+    } catch (migErr) {
+      // Column may already exist, ignore
+    }
 
     console.log("✅ Database Tables Ready: Users, Licenses, Jobs, Support Tickets, Ticket Replies");
   } catch (err) {
@@ -148,7 +159,12 @@ app.post('/api/auth/signup', async (req, res) => {
     );
 
     const user = result.rows[0];
-    const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, process.env.JWT_SECRET);
+    // Token with 30 day expiration
+    const token = jwt.sign(
+      { id: user.id, role: user.role, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
 
     res.json({ success: true, token, user });
   } catch (err) {
@@ -168,7 +184,12 @@ app.post('/api/auth/login', async (req, res) => {
     const validPass = await bcrypt.compare(password, user.password);
     if (!validPass) return res.status(400).json({ error: "Invalid Password" });
 
-    const token = jwt.sign({ id: user.id, role: user.role, email: user.email }, process.env.JWT_SECRET);
+    // Token with 30 day expiration
+    const token = jwt.sign(
+      { id: user.id, role: user.role, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
 
     res.json({ 
       success: true, 
@@ -360,13 +381,28 @@ app.delete('/api/admin/jobs/:id', authenticateToken, async (req, res) => {
 const submitTicket = async (req, res) => {
     const { name, email, category, subject, message, system_info, priority } = req.body;
     try {
-        const result = await pool.query(
-            'INSERT INTO support_tickets (name, email, category, subject, message, system_info, priority, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at, status',
-            [name, email, category, subject, message, system_info, priority || 'medium', 'OPEN']
-        );
+        // Try with priority column first
+        let result;
+        try {
+            result = await pool.query(
+                'INSERT INTO support_tickets (name, email, category, subject, message, system_info, priority, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at, status',
+                [name, email, category, subject, message, system_info, priority || 'medium', 'OPEN']
+            );
+        } catch (columnErr) {
+            // If priority column doesn't exist, insert without it
+            if (columnErr.code === '42703') {
+                console.log('Priority column not found, inserting without it');
+                result = await pool.query(
+                    'INSERT INTO support_tickets (name, email, category, subject, message, system_info, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at, status',
+                    [name, email, category, subject, message, system_info, 'OPEN']
+                );
+            } else {
+                throw columnErr;
+            }
+        }
         res.json({ success: true, ticket_id: result.rows[0].id, created_at: result.rows[0].created_at, status: result.rows[0].status });
     } catch (err) {
-        console.error('Ticket submission error:', err);
+        console.error('Ticket submission error:', err.message);
         res.status(500).json({ error: "Failed to submit ticket" });
     }
 };
@@ -386,6 +422,9 @@ app.get('/api/admin/tickets', (req, res, next) => {
 
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
+            if (err.name === 'TokenExpiredError') {
+                return res.status(401).json({ error: "Token Expired - Please login again" });
+            }
             console.error('Token verification error:', err.message);
             return res.status(403).json({ error: "Invalid Token" });
         }
@@ -428,6 +467,9 @@ app.get('/api/support/tickets/:id', (req, res, next) => {
 
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
+            if (err.name === 'TokenExpiredError') {
+                return res.status(401).json({ error: "Token Expired - Please login again" });
+            }
             return res.status(403).json({ error: "Invalid Token" });
         }
         req.user = user;
@@ -479,6 +521,9 @@ app.post('/api/support/tickets/:id/reply', (req, res, next) => {
 
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
+            if (err.name === 'TokenExpiredError') {
+                return res.status(401).json({ error: "Token Expired - Please login again" });
+            }
             return res.status(403).json({ error: "Invalid Token" });
         }
         req.user = user;
@@ -526,6 +571,9 @@ app.patch('/api/admin/tickets/:id/status', (req, res, next) => {
 
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
+            if (err.name === 'TokenExpiredError') {
+                return res.status(401).json({ error: "Token Expired - Please login again" });
+            }
             return res.status(403).json({ error: "Invalid Token" });
         }
         
