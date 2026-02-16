@@ -201,37 +201,28 @@ app.post('/api/activate', async (req, res) => {
 });
 
 // ----------------------
-// 3. AUTO-UPDATES (NEW)
+// 3. AUTO-UPDATES
 // ----------------------
 app.get('/api/updates/:target/:arch/:current_version', async (req, res) => {
     const { target, arch, current_version } = req.params;
     
-    // --- CONFIGURE THIS WHEN RELEASING A NEW VERSION ---
-    // In a real app, you might fetch this from a 'releases' table in DB
     const LATEST_VERSION = "0.2.0"; 
-    const UPDATE_NOTES = "Performance improvements, new drilling module, and UI updates.";
+    const UPDATE_NOTES = "Performance improvements, new drilling module, and notifications system.";
     const PUB_DATE = new Date().toISOString(); 
-    
-    // Links to your GitHub Releases (replace with actual links after build)
     const BASE_URL = "https://github.com/Start-OT/EdgePredict-Desktop/releases/latest/download";
-    
-    // Signatures from the build output (replace with actual content from .sig files)
     const SIGNATURE_WIN64 = "REPLACE_WITH_CONTENT_FROM_NSIS_ZIP_SIG_FILE";
-    // ---------------------------------------------------
 
     if (current_version === LATEST_VERSION) {
-        return res.status(204).send(); // No update needed
+        return res.status(204).send(); 
     }
 
     let url = "";
     let signature = "";
     
-    // Logic for Windows 64-bit
     if (target.includes("windows")) {
         url = `${BASE_URL}/EdgePredict_${LATEST_VERSION}_x64-setup.nsis.zip`;
         signature = SIGNATURE_WIN64;
     }
-    // Add Mac/Linux logic here if/when needed
 
     res.json({
         version: LATEST_VERSION,
@@ -243,9 +234,35 @@ app.get('/api/updates/:target/:arch/:current_version', async (req, res) => {
 });
 
 // ----------------------
-// 4. PAYMENT & LICENSES
+// 4. NOTIFICATIONS (NEW) ✅
 // ----------------------
+app.get('/api/notifications', async (req, res) => {
+    // In a real app, you'd fetch this from a 'messages' table
+    // For now, hardcode your announcements here!
+    
+    const notifications = [
+        {
+            id: 'welcome-msg',
+            type: 'INFO',
+            title: 'Welcome to EdgePredict v0.1',
+            message: 'Thanks for using our simulation software. Check out the new Tools Library!',
+            timestamp: new Date().toISOString()
+        },
+        {
+            id: 'maintenance-alert',
+            type: 'WARNING',
+            title: 'Scheduled Maintenance',
+            message: 'Server maintenance this Sunday at 2:00 AM UTC.',
+            timestamp: new Date().toISOString()
+        }
+    ];
 
+    res.json({ success: true, notifications });
+});
+
+// ----------------------
+// 5. PAYMENT & LICENSES
+// ----------------------
 app.post('/api/create-order', authenticateToken, async (req, res) => {
   const { tier } = req.body;
   const amount = tier === 'PRO' ? 149900 : 49900; 
@@ -290,7 +307,7 @@ app.get('/api/my-licenses', authenticateToken, async (req, res) => {
 });
 
 // ----------------------
-// 5. JOBS (Careers)
+// 6. JOBS (Careers)
 // ----------------------
 app.get('/api/jobs', async (req, res) => {
   try {
