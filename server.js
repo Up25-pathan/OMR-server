@@ -107,7 +107,21 @@ const initDB = async () => {
       // Column may already exist, ignore
     }
 
-    console.log("✅ Database Tables Ready: Users, Licenses, Jobs, Support Tickets, Ticket Replies");
+    // 7. Newsroom Table (NEW ✅ - For blog articles)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS newsroom (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        category VARCHAR(100) NOT NULL,
+        summary TEXT NOT NULL,
+        content TEXT NOT NULL,
+        read_time INT NOT NULL DEFAULT 5,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log("✅ Database Tables Ready: Users, Licenses, Jobs, Support Tickets, Ticket Replies, Newsroom");
   } catch (err) {
     console.error("❌ Database Init Error:", err);
   }
@@ -662,6 +676,174 @@ app.patch('/api/admin/tickets/:id/status', (req, res, next) => {
         console.error('Update status error:', err);
         res.status(500).json({ error: "Failed to update ticket status" });
     }
+});
+
+// ============================================
+// NEWSROOM API ENDPOINTS
+// ============================================
+
+// 1. CREATE NEW ARTICLE (Admin Only)
+app.post('/api/newsroom', authenticateToken, async (req, res) => {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+
+  const { title, category, summary, content, readTime } = req.body;
+
+  if (!title || !category || !summary || !content || !readTime) {
+    return res.status(400).json({ success: false, error: 'Missing required fields' });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO newsroom (title, category, summary, content, read_time, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+       RETURNING *`,
+      [title, category, summary, content, readTime]
+    );
+
+    const article = result.rows[0];
+    const date = new Date(article.created_at).toLocaleDateString('en-US', { 
+      year: 'numeric', 
+      month: 'short', 
+      day: 'numeric' 
+    });
+    
+    res.json({ 
+      success: true, 
+      article: {
+        ...article,
+        date,
+        readTime: `${article.read_time} min`
+      }
+    });
+  } catch (err) {
+    console.error('Error creating article:', err);
+    res.status(500).json({ success: false, error: 'Failed to create article' });
+  }
+});
+
+// 2. GET ALL ARTICLES (Public)
+app.get('/api/newsroom', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, title, category, summary, content, read_time, created_at, updated_at 
+       FROM newsroom 
+       ORDER BY created_at DESC`
+    );
+
+    const articles = result.rows.map(article => ({
+      ...article,
+      date: new Date(article.created_at).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric'
+      }),
+      readTime: `${article.read_time} min`
+    }));
+
+    res.json({ success: true, articles });
+  } catch (err) {
+    console.error('Error fetching articles:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch articles' });
+  }
+});
+
+// 3. GET SINGLE ARTICLE (Public)
+app.get('/api/newsroom/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await pool.query(
+      `SELECT id, title, category, summary, content, read_time, created_at 
+       FROM newsroom 
+       WHERE id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Article not found' });
+    }
+
+    const article = result.rows[0];
+    const date = new Date(article.created_at).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric'
+    });
+
+    res.json({
+      success: true,
+      article: {
+        ...article,
+        date,
+        readTime: `${article.read_time} min`
+      }
+    });
+  } catch (err) {
+    console.error('Error fetching article:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch article' });
+  }
+});
+
+// 4. UPDATE ARTICLE (Admin Only)
+app.put('/api/newsroom/:id', authenticateToken, async (req, res) => {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+
+  const { id } = req.params;
+  const { title, category, summary, content, readTime } = req.body;
+
+  try {
+    const result = await pool.query(
+      `UPDATE newsroom 
+       SET title = COALESCE($1, title),
+           category = COALESCE($2, category),
+           summary = COALESCE($3, summary),
+           content = COALESCE($4, content),
+           read_time = COALESCE($5, read_time),
+           updated_at = NOW()
+       WHERE id = $6
+       RETURNING *`,
+      [title, category, summary, content, readTime, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Article not found' });
+    }
+
+    const article = result.rows[0];
+    res.json({ success: true, article });
+  } catch (err) {
+    console.error('Error updating article:', err);
+    res.status(500).json({ success: false, error: 'Failed to update article' });
+  }
+});
+
+// 5. DELETE ARTICLE (Admin Only)
+app.delete('/api/newsroom/:id', authenticateToken, async (req, res) => {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+
+  const { id } = req.params;
+
+  try {
+    const result = await pool.query(
+      `DELETE FROM newsroom WHERE id = $1 RETURNING id`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Article not found' });
+    }
+
+    res.json({ success: true, message: 'Article deleted' });
+  } catch (err) {
+    console.error('Error deleting article:', err);
+    res.status(500).json({ success: false, error: 'Failed to delete article' });
+  }
 });
 
 const PORT = process.env.PORT || 5000;
