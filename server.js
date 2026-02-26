@@ -471,12 +471,17 @@ app.post('/api/verify-payment', authenticateToken, async (req, res) => {
       // 3. Database Updates
       await pool.query('INSERT INTO licenses (user_id, tier, license_key) VALUES ($1, $2, $3)', [req.user.id, tier, licenseKey]);
 
-      await pool.query(
-        'INSERT INTO invoices (user_id, order_id, payment_id, tier, amount, invoice_number, pdf_path) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      const invRes = await pool.query(
+        'INSERT INTO invoices (user_id, order_id, payment_id, tier, amount, invoice_number, pdf_path) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
         [req.user.id, razorpay_order_id, razorpay_payment_id, tier, amount, invoiceNumber, invoicePath]
       );
 
-      res.json({ success: true, license_key: licenseKey });
+      res.json({
+        success: true,
+        license_key: licenseKey,
+        invoice_id: invRes.rows[0].id,
+        invoice_number: invoiceNumber
+      });
     } catch (dbErr) {
       console.error("Invoice or License Generation Error:", dbErr);
       res.status(500).json({ error: "Processing completed with error: " + dbErr.message });
