@@ -40,10 +40,24 @@ const initDB = async () => {
         email VARCHAR(100) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
         company VARCHAR(100),
-        role VARCHAR(20) DEFAULT 'user', 
+        role VARCHAR(20) DEFAULT 'user',
+        reset_token VARCHAR(255),
+        reset_token_expires TIMESTAMP, 
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // Add reset_token columns if they don't exist
+    try {
+      await pool.query(`
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255),
+        ADD COLUMN IF NOT EXISTS reset_token_expires TIMESTAMP;
+      `);
+      console.log("✅ Reset token columns added to users table");
+    } catch (migErr) {
+      // Columns may already exist, ignore
+    }
     
     // 2. Licenses Table
     await pool.query(`
@@ -879,20 +893,31 @@ app.post('/api/auth/reset-password/:token', async (req, res) => {
   const { token } = req.params;
   const { password } = req.body;
   try {
-    const user = await pool.query('SELECT * FROM users WHERE reset_token_expires > NOW()');
-    if (user.rows.length === 0) {
+    // Find user with valid reset token
+    const users = await pool.query('SELECT * FROM users WHERE reset_token IS NOT NULL AND reset_token_expires > NOW()');
+    
+    if (users.rows.length === 0) {
       return res.status(400).json({ success: false, error: 'Invalid or expired token.' });
     }
 
-    const isValid = await bcrypt.compare(token, user.rows[0].reset_token);
-    if (!isValid) {
+    // Find the matching user by comparing tokens
+    let validUser = null;
+    for (const user of users.rows) {
+      const isValid = await bcrypt.compare(token, user.reset_token);
+      if (isValid) {
+        validUser = user;
+        break;
+      }
+    }
+
+    if (!validUser) {
       return res.status(400).json({ success: false, error: 'Invalid token.' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     await pool.query(
       'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2',
-      [hashedPassword, user.rows[0].id]
+      [hashedPassword, validUser.id]
     );
 
     res.json({ success: true, message: 'Password reset successfully.' });
