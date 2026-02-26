@@ -6,12 +6,31 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
 
 const app = express();
 
 // --- MIDDLEWARE ---
 app.use(cors());
 app.use(express.json());
+
+// --- EMAIL CONFIGURATION (Nodemailer + Gmail) ---
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+// Test email connection
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('❌ Email service error:', error.message);
+  } else {
+    console.log('✅ Email service ready');
+  }
+});
 
 // --- DATABASE CONNECTION ---
 const pool = new Pool({
@@ -878,13 +897,40 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       [hashedToken, expiresAt, email]
     );
 
-    // Send email (pseudo-code, replace with actual email logic)
-    console.log(`Reset link: https://omr-systems.com/reset-password/${resetToken}`);
+    const resetLink = `https://omr-systems.com/reset-password/${resetToken}`;
+    
+    // Send email via Nodemailer + Gmail
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'OMR Systems - Password Reset Request',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #333;">Password Reset Request</h2>
+          <p>Hello,</p>
+          <p>You requested to reset your password for your OMR Systems account. Click the button below to reset your password. This link is valid for <strong>1 hour</strong>.</p>
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${resetLink}" style="background-color: #FF6B35; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">Reset Password</a>
+          </div>
+          <p>Or copy and paste this link in your browser:</p>
+          <p style="background-color: #f4f4f4; padding: 10px; word-break: break-all;">${resetLink}</p>
+          <p style="color: #666; font-size: 12px;">If you did not request a password reset, please ignore this email or contact support.</p>
+          <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
+          <p style="color: #999; font-size: 12px;">© 2026 OMR Systems. All rights reserved.</p>
+        </div>
+      `
+    };
 
-    res.json({ success: true, message: 'Password reset link sent to your email.' });
+    await transporter.sendMail(mailOptions);
+    console.log(`✅ Password reset email sent to ${email}`);
+
+    res.json({ 
+      success: true, 
+      message: 'Password reset link sent to your email. Please check your inbox.',
+    });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, error: 'Internal server error.' });
+    console.error('Forgot password error:', err);
+    res.status(500).json({ success: false, error: 'Failed to send reset email. Please try again.' });
   }
 });
 
