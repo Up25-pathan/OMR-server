@@ -573,15 +573,87 @@ app.post('/api/admin/generate-license', authenticateToken, async (req, res) => {
     // Generate license key
     const licenseKey = generateLicenseKey();
 
+    // Generate Invoice PDF
+    const amount = tier === 'PRO' ? 1499.00 : 499.00;
+    const invoiceNumber = `INV-${Date.now()}`;
+    const invoiceFileName = `${invoiceNumber}.pdf`;
+    const invoiceDir = path.join(__dirname, 'invoices');
+    const invoicePath = path.join(invoiceDir, invoiceFileName);
+
+    // Ensure invoices directory exists
+    if (!fs.existsSync(invoiceDir)) {
+      fs.mkdirSync(invoiceDir, { recursive: true });
+    }
+
+    const doc = new PDFDocument({ margin: 50 });
+    const stream = fs.createWriteStream(invoicePath);
+    doc.pipe(stream);
+
+    // --- PDF Content ---
+    doc.fontSize(20).text('OMR Systems', { align: 'right' });
+    doc.fontSize(10).text('123 Innovation Drive', { align: 'right' });
+    doc.text('Tech City, TC 12345', { align: 'right' });
+    doc.moveDown();
+
+    doc.fontSize(24).text('INVOICE', { align: 'left' });
+    doc.moveDown();
+
+    doc.fontSize(12)
+      .text(`Invoice Number: ${invoiceNumber}`)
+      .text(`Date: ${new Date().toLocaleDateString()}`)
+      .text(`Order ID: Admin-Generated`)
+      .text(`Payment ID: Admin-Generated`);
+    doc.moveDown();
+
+    doc.text(`Bill To:`).moveDown(0.5);
+    doc.text(`User ID: ${userId}`);
+    doc.text(`Email: ${email}`);
+    doc.moveDown();
+
+    doc.rect(50, doc.y, 500, 20).fillAndStroke('#eeeeee', '#cccccc');
+    doc.fillColor('black').text('Description', 60, doc.y + 5);
+    doc.text('Amount', 450, doc.y, { width: 90, align: 'right' });
+    doc.moveDown(2);
+
+    const itemY = doc.y;
+    doc.text(`EdgePredict License - ${tier} Tier`, 60, itemY);
+    doc.text(`INR ${amount.toFixed(2)}`, 450, itemY, { width: 90, align: 'right' });
+    doc.moveDown();
+
+    doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+    doc.moveDown(0.5);
+    doc.fontSize(14).text('Total Paid:', 350, doc.y);
+    doc.text(`INR ${amount.toFixed(2)}`, 450, doc.y, { width: 90, align: 'right' });
+    doc.moveDown(2);
+
+    doc.fontSize(12).fillColor('green').text(`Your License Key: ${licenseKey}`, { align: 'center' });
+    doc.moveDown();
+
+    doc.fillColor('black').fontSize(10).text('Thank you for your business!', { align: 'center', align: 'center' });
+    doc.end();
+
+    await new Promise((resolve, reject) => {
+      stream.on('finish', resolve);
+      stream.on('error', reject);
+    });
+
     // Create license
     const result = await pool.query(
       'INSERT INTO licenses (user_id, tier, license_key) VALUES ($1, $2, $3) RETURNING *',
       [userId, tier, licenseKey]
     );
 
+    // Record invoice
+    const invRes = await pool.query(
+      'INSERT INTO invoices (user_id, order_id, payment_id, tier, amount, invoice_number, pdf_path) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
+      [userId, 'ADMIN_ORDER', 'ADMIN_ISSUED', tier, amount, invoiceNumber, invoicePath]
+    );
+
     res.json({
       success: true,
       license_key: licenseKey,
+      invoice_id: invRes.rows[0].id,
+      invoice_number: invoiceNumber,
       tier: tier,
       email: email,
       message: `License generated successfully for ${email}`
