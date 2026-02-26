@@ -846,5 +846,61 @@ app.delete('/api/newsroom/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// FORGOT PASSWORD
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  try {
+    const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (user.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'User not found.' });
+    }
+
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const hashedToken = await bcrypt.hash(resetToken, 10);
+    const expiresAt = new Date(Date.now() + 3600000); // 1 hour
+
+    await pool.query(
+      'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE email = $3',
+      [hashedToken, expiresAt, email]
+    );
+
+    // Send email (pseudo-code, replace with actual email logic)
+    console.log(`Reset link: https://omr-systems.com/reset-password/${resetToken}`);
+
+    res.json({ success: true, message: 'Password reset link sent to your email.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Internal server error.' });
+  }
+});
+
+// RESET PASSWORD
+app.post('/api/auth/reset-password/:token', async (req, res) => {
+  const { token } = req.params;
+  const { password } = req.body;
+  try {
+    const user = await pool.query('SELECT * FROM users WHERE reset_token_expires > NOW()');
+    if (user.rows.length === 0) {
+      return res.status(400).json({ success: false, error: 'Invalid or expired token.' });
+    }
+
+    const isValid = await bcrypt.compare(token, user.rows[0].reset_token);
+    if (!isValid) {
+      return res.status(400).json({ success: false, error: 'Invalid token.' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await pool.query(
+      'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2',
+      [hashedPassword, user.rows[0].id]
+    );
+
+    res.json({ success: true, message: 'Password reset successfully.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, error: 'Internal server error.' });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
