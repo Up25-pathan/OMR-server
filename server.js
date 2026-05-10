@@ -412,7 +412,7 @@ app.post('/api/verify-payment', authenticateToken, async (req, res) => {
 
       // --- PDF Content ---
       // Header
-      doc.fontSize(20).text('OMR Systems', { align: 'right' });
+      doc.fontSize(20).text('OMR Enterprises', { align: 'right' });
       doc.fontSize(10).text('123 Innovation Drive', { align: 'right' });
       doc.text('Tech City, TC 12345', { align: 'right' });
       doc.moveDown();
@@ -590,7 +590,7 @@ app.post('/api/admin/generate-license', authenticateToken, async (req, res) => {
     doc.pipe(stream);
 
     // --- PDF Content ---
-    doc.fontSize(20).text('OMR Systems', { align: 'right' });
+    doc.fontSize(20).text('OMR Enterprises', { align: 'right' });
     doc.fontSize(10).text('123 Innovation Drive', { align: 'right' });
     doc.text('Tech City, TC 12345', { align: 'right' });
     doc.moveDown();
@@ -729,7 +729,7 @@ const submitTicket = async (req, res) => {
 app.post('/api/support/tickets', submitTicket);
 app.post('/api/support', submitTicket);
 
-// Get All Tickets (For OMR Systems Website / Admin)
+// Get All Tickets (For OMR Enterprises Website / Admin)
 app.get('/api/admin/tickets', (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -928,6 +928,98 @@ app.patch('/api/admin/tickets/:id/status', (req, res, next) => {
   }
 });
 
+// ----------------------
+// 8. USER MANAGEMENT (NEW ✅)
+// ----------------------
+
+// Get all users (Admin only)
+app.get('/api/admin/users', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+  
+  try {
+    const result = await pool.query(`
+      SELECT u.id, u.name, u.email, u.role, u.company, u.created_at,
+             (SELECT COUNT(*) FROM licenses WHERE user_id = u.id) as license_count
+      FROM users u
+      ORDER BY u.created_at DESC
+    `);
+    res.json({ success: true, users: result.rows });
+  } catch (err) {
+    console.error('Fetch users error:', err);
+    res.status(500).json({ error: "Failed to fetch users" });
+  }
+});
+
+// Get specific user details (Admin only)
+app.get('/api/admin/users/:id/details', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+  const userId = req.params.id;
+
+  try {
+    // 1. Get basic user info
+    const userRes = await pool.query('SELECT id, name, email, role, company, created_at FROM users WHERE id = $1', [userId]);
+    if (userRes.rows.length === 0) return res.status(404).json({ error: "User not found" });
+    const user = userRes.rows[0];
+
+    // 2. Get licenses
+    const licensesRes = await pool.query('SELECT * FROM licenses WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+    
+    // 3. Get invoices
+    const invoicesRes = await pool.query('SELECT * FROM invoices WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+
+    // 4. Get support tickets
+    const ticketsRes = await pool.query('SELECT * FROM support_tickets WHERE email = $1 ORDER BY created_at DESC', [user.email]);
+
+    res.json({
+      success: true,
+      user: {
+        ...user,
+        licenses: licensesRes.rows,
+        invoices: invoicesRes.rows,
+        tickets: ticketsRes.rows
+      }
+    });
+  } catch (err) {
+    console.error('Fetch user details error:', err);
+    res.status(500).json({ error: "Failed to fetch user details" });
+  }
+});
+
+// Update user (Admin only)
+app.patch('/api/admin/users/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+  const userId = req.params.id;
+  const { role, company } = req.body;
+
+  try {
+    const result = await pool.query(
+      'UPDATE users SET role = COALESCE($1, role), company = COALESCE($2, company) WHERE id = $3 RETURNING id, name, email, role, company',
+      [role, company, userId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: "User not found" });
+    res.json({ success: true, user: result.rows[0] });
+  } catch (err) {
+    console.error('Update user error:', err);
+    res.status(500).json({ error: "Failed to update user" });
+  }
+});
+
+// Delete user (Admin only)
+app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+  const userId = req.params.id;
+
+  try {
+    // Delete user (cascades to licenses and invoices based on schema)
+    const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id', [userId]);
+    if (result.rows.length === 0) return res.status(404).json({ error: "User not found" });
+    res.json({ success: true, message: "User deleted successfully" });
+  } catch (err) {
+    console.error('Delete user error:', err);
+    res.status(500).json({ error: "Failed to delete user" });
+  }
+});
+
 // ============================================
 // NEWSROOM API ENDPOINTS
 // ============================================
@@ -1120,12 +1212,12 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     const mailOptions = {
       from: process.env.EMAIL_USER,
       to: email,
-      subject: 'OMR Systems - Password Reset Request',
+      subject: 'OMR Enterprises - Password Reset Request',
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #333;">Password Reset Request</h2>
           <p>Hello,</p>
-          <p>You requested to reset your password for your OMR Systems account. Click the button below to reset your password. This link is valid for <strong>1 hour</strong>.</p>
+          <p>You requested to reset your password for your OMR Enterprises account. Click the button below to reset your password. This link is valid for <strong>1 hour</strong>.</p>
           <div style="text-align: center; margin: 30px 0;">
             <a href="${resetLink}" style="background-color: #FF6B35; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block; font-weight: bold;">Reset Password</a>
           </div>
@@ -1133,7 +1225,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
           <p style="background-color: #f4f4f4; padding: 10px; word-break: break-all;">${resetLink}</p>
           <p style="color: #666; font-size: 12px;">If you did not request a password reset, please ignore this email or contact support.</p>
           <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
-          <p style="color: #999; font-size: 12px;">© 2026 OMR Systems. All rights reserved.</p>
+          <p style="color: #999; font-size: 12px;">© 2026 OMR Enterprises. All rights reserved.</p>
         </div>
       `
     };
