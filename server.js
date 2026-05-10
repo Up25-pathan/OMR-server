@@ -935,7 +935,7 @@ app.patch('/api/admin/tickets/:id/status', (req, res, next) => {
 // Get all users (Admin only)
 app.get('/api/admin/users', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
-  
+
   try {
     const result = await pool.query(`
       SELECT u.id, u.name, u.email, u.role, u.company, u.created_at,
@@ -963,7 +963,7 @@ app.get('/api/admin/users/:id/details', authenticateToken, async (req, res) => {
 
     // 2. Get licenses
     const licensesRes = await pool.query('SELECT * FROM licenses WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
-    
+
     // 3. Get invoices
     const invoicesRes = await pool.query('SELECT * FROM invoices WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
 
@@ -1017,6 +1017,35 @@ app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Delete user error:', err);
     res.status(500).json({ error: "Failed to delete user" });
+  }
+});
+
+// ----------------------
+// 9. ADMIN ANALYTICS (NEW ✅)
+// ----------------------
+app.get('/api/admin/stats', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+
+  try {
+    const userCount = await pool.query('SELECT COUNT(*) as count FROM users');
+    const licenseCount = await pool.query('SELECT COUNT(*) as count FROM licenses');
+    const openTickets = await pool.query("SELECT COUNT(*) as count FROM support_tickets WHERE UPPER(status) != 'RESOLVED' AND UPPER(status) != 'CLOSED'");
+    const jobCount = await pool.query('SELECT COUNT(*) as count FROM jobs');
+    const articleCount = await pool.query('SELECT COUNT(*) as count FROM newsroom');
+
+    res.json({
+      success: true,
+      stats: {
+        users: parseInt(userCount.rows[0].count),
+        licenses: parseInt(licenseCount.rows[0].count),
+        tickets: parseInt(openTickets.rows[0].count),
+        jobs: parseInt(jobCount.rows[0].count),
+        articles: parseInt(articleCount.rows[0].count)
+      }
+    });
+  } catch (err) {
+    console.error('Fetch stats error:', err);
+    res.status(500).json({ error: "Failed to fetch stats" });
   }
 });
 
