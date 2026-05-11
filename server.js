@@ -14,7 +14,23 @@ const path = require('path');
 const app = express();
 
 // --- MIDDLEWARE ---
-app.use(cors());
+const allowedOrigins = [
+  'https://omr-systems.com',
+  'https://www.omr-systems.com',
+  'http://localhost:5173', // Local Dev
+  'http://localhost:3000'
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true
+}));
 app.use(express.json());
 
 // --- EMAIL CONFIGURATION (Nodemailer + Gmail) ---
@@ -173,6 +189,20 @@ const initDB = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // 9. Audit Logs Table (NEW ✅ - For Security)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        admin_id INTEGER REFERENCES users(id),
+        action VARCHAR(100),
+        target_type VARCHAR(50),
+        target_id VARCHAR(100),
+        details JSONB,
+        ip_address VARCHAR(50),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
   } catch (err) {
     console.error("❌ Database Init Error:", err);
   }
@@ -196,6 +226,26 @@ const authenticateToken = (req, res, next) => {
     req.user = user;
     next();
   });
+};
+
+const adminOnly = (req, res, next) => {
+  authenticateToken(req, res, () => {
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: "Restricted Area: Admin Authority Required" });
+    }
+    next();
+  });
+};
+
+const logAudit = async (req, action, targetType, targetId, details = {}) => {
+  try {
+    await pool.query(
+      'INSERT INTO audit_logs (admin_id, action, target_type, target_id, details, ip_address) VALUES ($1, $2, $3, $4, $5, $6)',
+      [req.user.id, action, targetType, targetId, JSON.stringify(details), req.ip]
+    );
+  } catch (err) {
+    console.error('Audit Log Error:', err);
+  }
 };
 
 // ==================================================================
@@ -539,11 +589,7 @@ app.get('/api/invoices/:id/download', authenticateToken, async (req, res) => {
 });
 
 // ✅ NEW: Admin Generate License Directly (without payment)
-app.post('/api/admin/generate-license', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).json({ error: "Admins only" });
-  }
-
+app.post('/api/admin/generate-license', adminOnly, async (req, res) => {
   const { email, tier } = req.body;
 
   if (!email || !tier) {
@@ -649,6 +695,8 @@ app.post('/api/admin/generate-license', authenticateToken, async (req, res) => {
       [userId, 'ADMIN_ORDER', 'ADMIN_ISSUED', tier, amount, invoiceNumber, invoicePath]
     );
 
+    await logAudit(req, 'GENERATE_LICENSE', 'user', userId, { tier, email });
+
     res.json({
       success: true,
       license_key: licenseKey,
@@ -674,19 +722,19 @@ app.get('/api/jobs', async (req, res) => {
   } catch (err) { res.status(500).json({ error: "Failed to post job" }); }
 });
 
-app.post('/api/admin/jobs', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+app.post('/api/admin/jobs', adminOnly, async (req, res) => {
   const { title, department, location, type, description } = req.body;
   try {
     const result = await pool.query('INSERT INTO jobs (title, department, location, type, description) VALUES ($1, $2, $3, $4, $5) RETURNING *', [title, department, location, type, description]);
+    await logAudit(req, 'POST_JOB', 'job', result.rows[0].id, { title });
     res.json({ success: true, job: result.rows[0] });
   } catch (err) { res.status(500).json({ error: "Failed to post job" }); }
 });
 
-app.delete('/api/admin/jobs/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+app.delete('/api/admin/jobs/:id', adminOnly, async (req, res) => {
   try {
     await pool.query('DELETE FROM jobs WHERE id = $1', [req.params.id]);
+    await logAudit(req, 'DELETE_JOB', 'job', req.params.id);
     res.json({ success: true, message: "Job deleted" });
   } catch (err) { res.status(500).json({ error: "Failed to delete job" }); }
 });
@@ -730,31 +778,7 @@ app.post('/api/support/tickets', submitTicket);
 app.post('/api/support', submitTicket);
 
 // Get All Tickets (For OMR Enterprises Website / Admin)
-app.get('/api/admin/tickets', (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: "Access Denied - No token provided" });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      if (err.name === 'TokenExpiredError') {
-        return res.status(401).json({ error: "Token Expired - Please login again" });
-      }
-      console.error('Token verification error:', err.message);
-      return res.status(403).json({ error: "Invalid Token" });
-    }
-
-    if (user.role !== 'admin') {
-      return res.status(403).json({ error: "Admins only" });
-    }
-
-    req.user = user;
-    next();
-  });
-}, async (req, res) => {
+app.get('/api/admin/tickets', adminOnly, async (req, res) => {
   const status = req.query.status;
   try {
     let query = 'SELECT * FROM support_tickets';
@@ -879,30 +903,7 @@ app.post('/api/support/tickets/:id/reply', (req, res, next) => {
 });
 
 // ✅ NEW: Update Ticket Status (Admin only)
-app.patch('/api/admin/tickets/:id/status', (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: "Access Denied - No token provided" });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      if (err.name === 'TokenExpiredError') {
-        return res.status(401).json({ error: "Token Expired - Please login again" });
-      }
-      return res.status(403).json({ error: "Invalid Token" });
-    }
-
-    if (user.role !== 'admin') {
-      return res.status(403).json({ error: "Admins only" });
-    }
-
-    req.user = user;
-    next();
-  });
-}, async (req, res) => {
+app.patch('/api/admin/tickets/:id/status', adminOnly, async (req, res) => {
   const ticketId = req.params.id;
   const { status } = req.body;
 
@@ -921,6 +922,8 @@ app.patch('/api/admin/tickets/:id/status', (req, res, next) => {
       return res.status(404).json({ error: "Ticket not found" });
     }
 
+    await logAudit(req, 'UPDATE_TICKET_STATUS', 'ticket', ticketId, { status });
+
     res.json({ success: true, ticket: result.rows[0] });
   } catch (err) {
     console.error('Update status error:', err);
@@ -933,8 +936,7 @@ app.patch('/api/admin/tickets/:id/status', (req, res, next) => {
 // ----------------------
 
 // Get all users (Admin only)
-app.get('/api/admin/users', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+app.get('/api/admin/users', adminOnly, async (req, res) => {
 
   try {
     const result = await pool.query(`
@@ -951,8 +953,7 @@ app.get('/api/admin/users', authenticateToken, async (req, res) => {
 });
 
 // Get specific user details (Admin only)
-app.get('/api/admin/users/:id/details', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+app.get('/api/admin/users/:id/details', adminOnly, async (req, res) => {
   const userId = req.params.id;
 
   try {
@@ -986,8 +987,7 @@ app.get('/api/admin/users/:id/details', authenticateToken, async (req, res) => {
 });
 
 // Update user (Admin only)
-app.patch('/api/admin/users/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+app.patch('/api/admin/users/:id', adminOnly, async (req, res) => {
   const userId = req.params.id;
   const { role, company } = req.body;
 
@@ -997,6 +997,9 @@ app.patch('/api/admin/users/:id', authenticateToken, async (req, res) => {
       [role, company, userId]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: "User not found" });
+
+    await logAudit(req, 'UPDATE_USER', 'user', userId, { role, company });
+
     res.json({ success: true, user: result.rows[0] });
   } catch (err) {
     console.error('Update user error:', err);
@@ -1005,14 +1008,16 @@ app.patch('/api/admin/users/:id', authenticateToken, async (req, res) => {
 });
 
 // Delete user (Admin only)
-app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+app.delete('/api/admin/users/:id', adminOnly, async (req, res) => {
   const userId = req.params.id;
 
   try {
     // Delete user (cascades to licenses and invoices based on schema)
     const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id', [userId]);
     if (result.rows.length === 0) return res.status(404).json({ error: "User not found" });
+
+    await logAudit(req, 'DELETE_USER', 'user', userId);
+
     res.json({ success: true, message: "User deleted successfully" });
   } catch (err) {
     console.error('Delete user error:', err);
@@ -1023,8 +1028,7 @@ app.delete('/api/admin/users/:id', authenticateToken, async (req, res) => {
 // ----------------------
 // 9. ADMIN ANALYTICS (NEW ✅)
 // ----------------------
-app.get('/api/admin/stats', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: "Admins only" });
+app.get('/api/admin/stats', adminOnly, async (req, res) => {
 
   try {
     const userCount = await pool.query('SELECT COUNT(*) as count FROM users');
@@ -1054,11 +1058,7 @@ app.get('/api/admin/stats', authenticateToken, async (req, res) => {
 // ============================================
 
 // 1. CREATE NEW ARTICLE (Admin Only)
-app.post('/api/newsroom', authenticateToken, async (req, res) => {
-  if (!req.user || req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-
+app.post('/api/newsroom', adminOnly, async (req, res) => {
   const { title, category, summary, content, readTime } = req.body;
 
   if (!title || !category || !summary || !content || !readTime) {
@@ -1158,11 +1158,7 @@ app.get('/api/newsroom/:id', async (req, res) => {
 });
 
 // 4. UPDATE ARTICLE (Admin Only)
-app.put('/api/newsroom/:id', authenticateToken, async (req, res) => {
-  if (!req.user || req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-
+app.put('/api/newsroom/:id', adminOnly, async (req, res) => {
   const { id } = req.params;
   const { title, category, summary, content, readTime } = req.body;
 
@@ -1185,6 +1181,9 @@ app.put('/api/newsroom/:id', authenticateToken, async (req, res) => {
     }
 
     const article = result.rows[0];
+
+    await logAudit(req, 'UPDATE_ARTICLE', 'article', id, { title: article.title });
+
     res.json({ success: true, article });
   } catch (err) {
     console.error('Error updating article:', err);
@@ -1193,11 +1192,7 @@ app.put('/api/newsroom/:id', authenticateToken, async (req, res) => {
 });
 
 // 5. DELETE ARTICLE (Admin Only)
-app.delete('/api/newsroom/:id', authenticateToken, async (req, res) => {
-  if (!req.user || req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Admin access required' });
-  }
-
+app.delete('/api/newsroom/:id', adminOnly, async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -1209,6 +1204,8 @@ app.delete('/api/newsroom/:id', authenticateToken, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'Article not found' });
     }
+
+    await logAudit(req, 'DELETE_ARTICLE', 'article', id);
 
     res.json({ success: true, message: 'Article deleted' });
   } catch (err) {
