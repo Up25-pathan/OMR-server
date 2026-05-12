@@ -10,10 +10,66 @@ const nodemailer = require('nodemailer');
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
+const helmet = require('helmet');
+const cookieParser = require('cookie-parser');
+const winston = require('winston');
+const rateLimit = require('express-rate-limit');
+
+const { z } = require('zod');
+
+// --- VALIDATION SCHEMAS (Zod) ---
+const LoginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(6),
+});
+
+const SignupSchema = z.object({
+  name: z.string().min(2),
+  email: z.string().email(),
+  password: z.string().min(6),
+  company: z.string().optional(),
+});
+
+const JobSchema = z.object({
+  title: z.string().min(3),
+  department: z.string().min(2),
+  location: z.string().min(2),
+  type: z.enum(['Full-time', 'Part-time', 'Contract', 'Internship']),
+  description: z.string().min(10),
+});
+
+const NewsroomSchema = z.object({
+  title: z.string().min(5),
+  category: z.string(),
+  summary: z.string().min(10),
+  content: z.string().min(20),
+  readTime: z.string().or(z.number()),
+});
 
 const app = express();
 
+// --- LOGGER CONFIGURATION (Winston) ---
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.File({ filename: 'error.log', level: 'error' }),
+    new winston.transports.File({ filename: 'combined.log' }),
+  ],
+});
+
+if (process.env.NODE_ENV !== 'production') {
+  logger.add(new winston.transports.Console({
+    format: winston.format.simple(),
+  }));
+}
+
 // --- MIDDLEWARE ---
+app.use(helmet());
+app.use(cookieParser());
 const allowedOrigins = [
   'https://omr-systems.com',
   'https://www.omr-systems.com',
@@ -216,13 +272,17 @@ const generateLicenseKey = () => {
 };
 
 const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+  const token = req.cookies.omr_token;
 
-  if (!token) return res.status(401).json({ error: "Access Denied" });
+  if (!token) {
+    return res.status(401).json({ error: "Access Denied: Session Expired" });
+  }
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Invalid Token" });
+    if (err) {
+      res.clearCookie('omr_token');
+      return res.status(403).json({ error: "Invalid Session" });
+    }
     req.user = user;
     next();
   });
@@ -258,8 +318,10 @@ const logAudit = async (req, action, targetType, targetId, details = {}) => {
 
 // SIGNUP
 app.post('/api/auth/signup', async (req, res) => {
-  const { name, email, password, company } = req.body;
   try {
+    const validatedData = SignupSchema.parse(req.body);
+    const { name, email, password, company } = validatedData;
+
     const userCheck = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
     if (userCheck.rows.length > 0) {
       return res.status(400).json({ error: "Email already exists" });
@@ -274,24 +336,36 @@ app.post('/api/auth/signup', async (req, res) => {
     );
 
     const user = result.rows[0];
-    // Token with 30 day expiration
     const token = jwt.sign(
       { id: user.id, role: user.role, email: user.email },
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
     );
 
-    res.json({ success: true, token, user });
+    res.cookie('omr_token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+    });
+
+    logger.info(`New user registered: ${email}`);
+    res.json({ success: true, user });
   } catch (err) {
-    console.error(err);
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: err.errors[0].message });
+    }
+    logger.error('Signup Error:', err);
     res.status(500).json({ error: "Server Error during Signup" });
   }
 });
 
 // LOGIN
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
   try {
+    const validatedData = LoginSchema.parse(req.body);
+    const { email, password } = validatedData;
+
     const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
     if (result.rows.length === 0) return res.status(400).json({ error: "User not found" });
 
@@ -299,22 +373,37 @@ app.post('/api/auth/login', async (req, res) => {
     const validPass = await bcrypt.compare(password, user.password);
     if (!validPass) return res.status(400).json({ error: "Invalid Password" });
 
-    // Token with 30 day expiration
     const token = jwt.sign(
       { id: user.id, role: user.role, email: user.email },
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
     );
 
+    res.cookie('omr_token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 30 * 24 * 60 * 60 * 1000
+    });
+
+    logger.info(`User login: ${email}`);
     res.json({
       success: true,
-      token,
       user: { id: user.id, name: user.name, email: user.email, role: user.role, company: user.company }
     });
   } catch (err) {
-    console.error(err);
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: err.errors[0].message });
+    }
+    logger.error('Login Error:', err);
     res.status(500).json({ error: "Server Error during Login" });
   }
+});
+
+// LOGOUT
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('omr_token');
+  res.json({ success: true });
 });
 
 // ----------------------
@@ -723,12 +812,20 @@ app.get('/api/jobs', async (req, res) => {
 });
 
 app.post('/api/admin/jobs', adminOnly, async (req, res) => {
-  const { title, department, location, type, description } = req.body;
   try {
+    const validatedData = JobSchema.parse(req.body);
+    const { title, department, location, type, description } = validatedData;
+    
     const result = await pool.query('INSERT INTO jobs (title, department, location, type, description) VALUES ($1, $2, $3, $4, $5) RETURNING *', [title, department, location, type, description]);
     await logAudit(req, 'POST_JOB', 'job', result.rows[0].id, { title });
     res.json({ success: true, job: result.rows[0] });
-  } catch (err) { res.status(500).json({ error: "Failed to post job" }); }
+  } catch (err) { 
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: err.errors[0].message });
+    }
+    logger.error('Post Job Error:', err);
+    res.status(500).json({ error: "Failed to post job" }); 
+  }
 });
 
 app.delete('/api/admin/jobs/:id', adminOnly, async (req, res) => {
@@ -1059,13 +1156,10 @@ app.get('/api/admin/stats', adminOnly, async (req, res) => {
 
 // 1. CREATE NEW ARTICLE (Admin Only)
 app.post('/api/newsroom', adminOnly, async (req, res) => {
-  const { title, category, summary, content, readTime } = req.body;
-
-  if (!title || !category || !summary || !content || !readTime) {
-    return res.status(400).json({ success: false, error: 'Missing required fields' });
-  }
-
   try {
+    const validatedData = NewsroomSchema.parse(req.body);
+    const { title, category, summary, content, readTime } = validatedData;
+
     const result = await pool.query(
       `INSERT INTO newsroom (title, category, summary, content, read_time, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
@@ -1080,6 +1174,8 @@ app.post('/api/newsroom', adminOnly, async (req, res) => {
       day: 'numeric'
     });
 
+    await logAudit(req, 'CREATE_ARTICLE', 'article', article.id, { title: article.title });
+
     res.json({
       success: true,
       article: {
@@ -1089,7 +1185,10 @@ app.post('/api/newsroom', adminOnly, async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Error creating article:', err);
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: err.errors[0].message });
+    }
+    logger.error('Create Article Error:', err);
     res.status(500).json({ success: false, error: 'Failed to create article' });
   }
 });
@@ -1159,18 +1258,14 @@ app.get('/api/newsroom/:id', async (req, res) => {
 
 // 4. UPDATE ARTICLE (Admin Only)
 app.put('/api/newsroom/:id', adminOnly, async (req, res) => {
-  const { id } = req.params;
-  const { title, category, summary, content, readTime } = req.body;
-
   try {
+    const { id } = req.params;
+    const validatedData = NewsroomSchema.parse(req.body);
+    const { title, category, summary, content, readTime } = validatedData;
+
     const result = await pool.query(
       `UPDATE newsroom 
-       SET title = COALESCE($1, title),
-           category = COALESCE($2, category),
-           summary = COALESCE($3, summary),
-           content = COALESCE($4, content),
-           read_time = COALESCE($5, read_time),
-           updated_at = NOW()
+       SET title = $1, category = $2, summary = $3, content = $4, read_time = $5, updated_at = NOW()
        WHERE id = $6
        RETURNING *`,
       [title, category, summary, content, readTime, id]
@@ -1186,7 +1281,10 @@ app.put('/api/newsroom/:id', adminOnly, async (req, res) => {
 
     res.json({ success: true, article });
   } catch (err) {
-    console.error('Error updating article:', err);
+    if (err instanceof z.ZodError) {
+      return res.status(400).json({ error: err.errors[0].message });
+    }
+    logger.error('Update Article Error:', err);
     res.status(500).json({ success: false, error: 'Failed to update article' });
   }
 });
