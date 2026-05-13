@@ -823,7 +823,7 @@ app.get('/api/jobs', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM jobs ORDER BY posted_at DESC');
     res.json({ success: true, jobs: result.rows });
-  } catch (err) { res.status(500).json({ error: "Failed to post job" }); }
+  } catch (err) { res.status(500).json({ error: "Failed to fetch jobs" }); }
 });
 
 app.post('/api/admin/jobs', adminOnly, async (req, res) => {
