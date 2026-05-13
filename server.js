@@ -71,6 +71,7 @@ if (process.env.NODE_ENV !== 'production') {
 app.use(helmet());
 app.use(cookieParser());
 const allowedOrigins = [
+  'https://omrenterprises.netlify.app',
   'https://omr-systems.com',
   'https://www.omr-systems.com',
   'http://localhost:5173', // Local Dev
@@ -113,7 +114,9 @@ transporter.verify((error, success) => {
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
-    rejectUnauthorized: false
+    rejectUnauthorized: false,
+    // Add explicitly to silence the libpq semantics warning if needed
+    // or rely on the connection string parameters
   }
 });
 
