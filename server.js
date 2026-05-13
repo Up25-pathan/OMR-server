@@ -74,14 +74,16 @@ const allowedOrigins = [
   'https://omr-systems.com',
   'https://www.omr-systems.com',
   'http://localhost:5173', // Local Dev
-  'http://localhost:3000'
-];
+  'http://localhost:3000',
+  process.env.FRONTEND_URL
+].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
+      console.error('❌ CORS Error: Origin', origin, 'is not in allowedOrigins:', allowedOrigins);
       callback(new Error('Not allowed by CORS'));
     }
   },
