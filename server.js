@@ -524,7 +524,7 @@ app.get('/api/notifications', async (req, res) => {
 // ----------------------
 app.post('/api/create-order', authenticateToken, async (req, res) => {
   const { tier } = req.body;
-  const amount = tier === 'PRO' ? 149900 : 49900;
+  const amount = tier === 'PRO' ? 15000000 : 5000000; // 1.5 Lakh and 50k in paise
   try {
     const options = {
       amount: amount,
@@ -547,7 +547,7 @@ app.post('/api/verify-payment', authenticateToken, async (req, res) => {
     const licenseKey = generateLicenseKey();
 
     // Calculate amount based on tier for invoice
-    const amount = tier === 'PRO' ? 1499.00 : 499.00; // Assuming this is correct without decimal for INR
+    const amount = tier === 'PRO' ? 150000.00 : 50000.00; 
     const invoiceNumber = `INV-${Date.now()}`;
     const invoiceFileName = `${invoiceNumber}.pdf`;
     const invoiceDir = path.join(__dirname, 'invoices');
@@ -724,7 +724,7 @@ app.post('/api/admin/generate-license', adminOnly, async (req, res) => {
     const licenseKey = generateLicenseKey();
 
     // Generate Invoice PDF
-    const amount = tier === 'PRO' ? 1499.00 : 499.00;
+    const amount = tier === 'PRO' ? 150000.00 : 50000.00;
     const invoiceNumber = `INV-${Date.now()}`;
     const invoiceFileName = `${invoiceNumber}.pdf`;
     const invoiceDir = path.join(__dirname, 'invoices');
