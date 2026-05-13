@@ -12,14 +12,19 @@
   "license": "ISC",
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.5.1",
+    "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "nodemailer": "^8.0.1",
     "pdfkit": "^0.17.2",
     "pg": "^8.17.1",
     "razorpay": "^2.9.6",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "winston": "^3.19.0",
+    "zod": "^4.4.3"
   }
 }
