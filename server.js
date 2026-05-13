@@ -71,20 +71,17 @@ if (process.env.NODE_ENV !== 'production') {
 app.use(helmet());
 app.use(cookieParser());
 const allowedOrigins = [
-  'https://omrenterprises.netlify.app',
   'https://omr-systems.com',
   'https://www.omr-systems.com',
   'http://localhost:5173', // Local Dev
-  'http://localhost:3000',
-  process.env.FRONTEND_URL
-].filter(Boolean);
+  'http://localhost:3000'
+];
 
 app.use(cors({
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      console.error('❌ CORS Error: Origin', origin, 'is not in allowedOrigins:', allowedOrigins);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -114,9 +111,7 @@ transporter.verify((error, success) => {
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
-    rejectUnauthorized: false,
-    // Add explicitly to silence the libpq semantics warning if needed
-    // or rely on the connection string parameters
+    rejectUnauthorized: false
   }
 });
 
@@ -349,8 +344,8 @@ app.post('/api/auth/signup', async (req, res) => {
 
     res.cookie('omr_token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: true,
+      sameSite: 'none',
       maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
     });
 
@@ -386,8 +381,8 @@ app.post('/api/auth/login', async (req, res) => {
 
     res.cookie('omr_token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: true,
+      sameSite: 'none',
       maxAge: 30 * 24 * 60 * 60 * 1000
     });
 
@@ -409,6 +404,19 @@ app.post('/api/auth/login', async (req, res) => {
 app.post('/api/auth/logout', (req, res) => {
   res.clearCookie('omr_token');
   res.json({ success: true });
+});
+
+// VERIFY SESSION
+app.get('/api/auth/verify', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, name, email, role, company FROM users WHERE id = $1', [req.user.id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    res.json({ success: true, user: result.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 // ----------------------
