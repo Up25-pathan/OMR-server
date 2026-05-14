@@ -1,4 +1,8 @@
 require('dotenv').config();
+const dns = require('dns');
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
@@ -74,16 +78,27 @@ const allowedOrigins = [
   'https://omr-systems.com',
   'https://www.omr-systems.com',
   'https://omrenterprises.netlify.app',
+  'https://omr-server-fww3.onrender.com',
   'http://localhost:5173',
   'http://localhost:3000',
-  'http://127.0.0.1:5173'
+  'http://127.0.0.1:5173',
+  'tauri://localhost',
+  'http://tauri.localhost'
 ];
 
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.netlify.app')) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    
+    const isAllowed = allowedOrigins.indexOf(origin) !== -1 || 
+                     origin.endsWith('.netlify.app') || 
+                     origin.endsWith('.onrender.com');
+
+    if (isAllowed) {
       callback(null, true);
     } else {
+      console.error(`❌ CORS Blocked for origin: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
@@ -93,11 +108,16 @@ app.use(express.json());
 
 // --- EMAIL CONFIGURATION (Nodemailer + Gmail) ---
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true, // Use SSL
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
+  tls: {
+    rejectUnauthorized: false
+  }
 });
 
 // Test email connection
