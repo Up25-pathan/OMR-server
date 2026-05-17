@@ -446,6 +446,30 @@ app.get('/api/auth/verify', authenticateToken, async (req, res) => {
   }
 });
 
+// UPDATE PROFILE
+app.put('/api/user/profile', authenticateToken, async (req, res) => {
+  try {
+    const { name, company } = req.body;
+    if (!name || name.trim().length < 2) {
+      return res.status(400).json({ error: "Name must be at least 2 characters long." });
+    }
+    
+    const result = await pool.query(
+      'UPDATE users SET name = $1, company = $2 WHERE id = $3 RETURNING id, name, email, role, company',
+      [name, company || null, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json({ success: true, user: result.rows[0] });
+  } catch (err) {
+    console.error("Profile update error:", err);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
 // ----------------------
 // 2. ACTIVATE LICENSE
 // ----------------------
