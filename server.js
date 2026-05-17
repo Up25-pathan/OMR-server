@@ -81,6 +81,7 @@ const allowedOrigins = [
   'https://omr-server-fww3.onrender.com',
   'http://localhost:5173',
   'http://localhost:3000',
+  'http://localhost:5000',
   'http://127.0.0.1:5173',
   'tauri://localhost',
   'http://tauri.localhost'
@@ -935,25 +936,7 @@ app.get('/api/admin/tickets', adminOnly, async (req, res) => {
 });
 
 // ✅ NEW: Get Single Ticket with Replies
-app.get('/api/support/tickets/:id', (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: "Access Denied - No token provided" });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      if (err.name === 'TokenExpiredError') {
-        return res.status(401).json({ error: "Token Expired - Please login again" });
-      }
-      return res.status(403).json({ error: "Invalid Token" });
-    }
-    req.user = user;
-    next();
-  });
-}, async (req, res) => {
+app.get('/api/support/tickets/:id', authenticateToken, async (req, res) => {
   const ticketId = req.params.id;
 
   try {
@@ -989,25 +972,7 @@ app.get('/api/support/tickets/:id', (req, res, next) => {
 });
 
 // ✅ NEW: Add Reply to Ticket
-app.post('/api/support/tickets/:id/reply', (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: "Access Denied - No token provided" });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-    if (err) {
-      if (err.name === 'TokenExpiredError') {
-        return res.status(401).json({ error: "Token Expired - Please login again" });
-      }
-      return res.status(403).json({ error: "Invalid Token" });
-    }
-    req.user = user;
-    next();
-  });
-}, async (req, res) => {
+app.post('/api/support/tickets/:id/reply', authenticateToken, async (req, res) => {
   const ticketId = req.params.id;
   const { message } = req.body;
 
@@ -1369,7 +1334,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       [hashedToken, expiresAt, email]
     );
 
-    const resetLink = `https://omr-systems.com/reset-password/${resetToken}`;
+    const origin = req.get('origin') || 'https://omr-systems.com';
+    const resetLink = `${origin}/reset-password/${resetToken}`;
 
     // Send email via Nodemailer + Gmail
     const mailOptions = {
