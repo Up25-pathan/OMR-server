@@ -91,10 +91,10 @@ app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
-    
-    const isAllowed = allowedOrigins.indexOf(origin) !== -1 || 
-                     origin.endsWith('.netlify.app') || 
-                     origin.endsWith('.onrender.com');
+
+    const isAllowed = allowedOrigins.indexOf(origin) !== -1 ||
+      origin.endsWith('.netlify.app') ||
+      origin.endsWith('.onrender.com');
 
     if (isAllowed) {
       callback(null, true);
@@ -453,7 +453,7 @@ app.put('/api/user/profile', authenticateToken, async (req, res) => {
     if (!name || name.trim().length < 2) {
       return res.status(400).json({ error: "Name must be at least 2 characters long." });
     }
-    
+
     const result = await pool.query(
       'UPDATE users SET name = $1, company = $2 WHERE id = $3 RETURNING id, name, email, role, company',
       [name, company || null, req.user.id]
@@ -596,7 +596,7 @@ app.post('/api/verify-payment', authenticateToken, async (req, res) => {
     const licenseKey = generateLicenseKey();
 
     // Calculate amount based on tier for invoice
-    const amount = tier === 'PRO' ? 150000.00 : 50000.00; 
+    const amount = tier === 'PRO' ? 150000.00 : 50000.00;
     const invoiceNumber = `INV-${Date.now()}`;
     const invoiceFileName = `${invoiceNumber}.pdf`;
     const invoiceDir = path.join(__dirname, 'invoices');
@@ -879,16 +879,16 @@ app.post('/api/admin/jobs', adminOnly, async (req, res) => {
   try {
     const validatedData = JobSchema.parse(req.body);
     const { title, department, location, type, description } = validatedData;
-    
+
     const result = await pool.query('INSERT INTO jobs (title, department, location, type, description) VALUES ($1, $2, $3, $4, $5) RETURNING *', [title, department, location, type, description]);
     await logAudit(req, 'POST_JOB', 'job', result.rows[0].id, { title });
     res.json({ success: true, job: result.rows[0] });
-  } catch (err) { 
+  } catch (err) {
     if (err instanceof z.ZodError) {
       return res.status(400).json({ error: err.errors[0].message });
     }
     logger.error('Post Job Error:', err);
-    res.status(500).json({ error: "Failed to post job" }); 
+    res.status(500).json({ error: "Failed to post job" });
   }
 });
 
@@ -1053,6 +1053,29 @@ app.patch('/api/admin/tickets/:id/status', adminOnly, async (req, res) => {
   } catch (err) {
     console.error('Update status error:', err);
     res.status(500).json({ error: "Failed to update ticket status" });
+  }
+});
+
+// ✅ NEW: Delete Ticket (Admin only)
+app.delete('/api/admin/tickets/:id', adminOnly, async (req, res) => {
+  const ticketId = req.params.id;
+
+  try {
+    const result = await pool.query(
+      'DELETE FROM support_tickets WHERE id = $1 RETURNING *',
+      [ticketId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Ticket not found" });
+    }
+
+    await logAudit(req, 'DELETE_TICKET', 'ticket', ticketId);
+
+    res.json({ success: true, message: "Ticket and its replies deleted successfully" });
+  } catch (err) {
+    console.error('Delete ticket error:', err);
+    res.status(500).json({ error: "Failed to delete ticket" });
   }
 });
 
